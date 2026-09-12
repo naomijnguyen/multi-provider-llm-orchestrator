@@ -1,0 +1,248 @@
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+import anthropic
+import openai
+
+if TYPE_CHECKING:
+    from .config import Config, ModelConfig
+
+log = logging.getLogger(__name__)
+
+# Which token-limit parameter each model accepts, learned on first call.
+_TOKEN_PARAM: dict[str, str] = {}
+
+# One client per provider, reused. Constructing a client per call leaks its
+# connection pool: a 120-generation run at CONCURRENCY=4 was found holding 18
+# ESTABLISHED sockets and climbing, then stalled at 0% CPU with no progress for
+# 50 minutes.
+_CLIENTS: dict[str, object] = {}
+
+# An explicit, short timeout matters more than the number itself. Without one, a
+# request that never returns holds its semaphore slot forever; with only four
+# slots, four such requests deadlock the entire run — which is what happened.
+# Failing fast and retrying is strictly better than hanging: a retry costs
+# seconds, a hang costs the run.
+REQUEST_TIMEOUT_S = 120.0
+MAX_RETRIES = 3
+
+# Discord's per-message limit is 2000 characters. This is the bot's default
+# ceiling; channels.py chunks anything longer rather than dropping it.
+MAX_RESPONSE_LEN = 1900
+
+
+@dataclass(frozen=True)
+class Generation:
+    """A response plus the facts you need to know whether it was cut short."""
+    text: str
+    finish_reason: str          # "stop" | "length" | "error" | provider value
+    raw_chars: int              # length before any truncation of ours
+    truncated_by_us: bool       # did max_len clip it
+    # Extended thinking. None means "this provider does not report it", which
+    # is not the same as zero.
+    #
+    # Presence and content are separate facts. The Anthropic API returns a
+    # ThinkingBlock carrying a `signature` but an EMPTY `thinking` string — the
+    # reasoning content is not exposed. So the number of blocks is observable
+    # and its length is not. Deriving presence from length (`chars > 0`) reads
+    # every thinking response as not-thinking, which is the bug this comment
+    # exists to prevent recurring.
+    thinking_blocks: int | None = None
+    thinking_chars: int | None = None   # None = present but not exposed
+
+    # Reasoning effort in tokens, which every provider here reports even when it
+    # withholds the text — Anthropic as usage.output_tokens_details.thinking_
+    # tokens, the OpenAI-compatible three as usage.completion_tokens_details.
+    # reasoning_tokens. This is a far better measure than presence/absence: it
+    # is graded rather than binary, and it is the one reasoning quantity
+    # available on comparable terms across providers.
+    reasoning_tokens: int | None = None
+    # The chain of thought itself, where the provider returns it. Only xAI does
+    # (`reasoning_content`); Anthropic returns a signature with empty text and
+    # OpenAI returns nothing. None means not exposed, never "did not reason".
+    reasoning_text: str | None = None
+
+    @property
+    def had_thinking(self) -> bool | None:
+        """Did the model reason at all. Prefers the token count, which is
+        reported even where blocks and text are not."""
+        if self.reasoning_tokens is not None:
+            return self.reasoning_tokens > 0
+        return None if self.thinking_blocks is None else self.thinking_blocks > 0
+
+    @property
+    def hit_token_cap(self) -> bool:
+        return self.finish_reason == "length"
+
+
+async def generate(
+    config: Config,
+    model: ModelConfig,
+    system_prompt: str,
+    user_message: str,
+    max_tokens: int = 2048,
+) -> str:
+    """Text only. The bot's entry point."""
+    return (await generate_detailed(
+        config, model, system_prompt, user_message, max_tokens
+    )).text
+
+
+async def generate_detailed(
+    config: Config,
+    model: ModelConfig,
+    system_prompt: str,
+    user_message: str,
+    max_tokens: int = 2048,
+    max_len: int | None = MAX_RESPONSE_LEN,
+) -> Generation:
+    """Generate a response, routing to the correct SDK.
+
+    max_len=None disables our own truncation. The experiment passes None: the
+    1900-char cut exists for Discord, and applying it to data written to CSV
+    would censor response length, which is one of the measures.
+    """
+    try:
+        if not model.model_id or not config.api_key_for(model.provider):
+            raise ValueError("Configure a model ID and provider key before generation.")
+        if model.provider == "anthropic":
+            text, reason, extra = await _call_anthropic(
+                config, model, system_prompt, user_message, max_tokens)
+        else:
+            text, reason, extra = await _call_openai_compat(
+                config, model, system_prompt, user_message, max_tokens)
+    except Exception as e:
+        log.exception("Error calling %s: %s", model.name, e)
+        return Generation(
+            f"*[{model.display_name} is having a moment and couldn't respond: {type(e).__name__}]*",
+            "error", 0, False)
+
+    raw = len(text)
+    if max_len is not None and raw > max_len:
+        return Generation(text[:max_len], reason, raw, True, **extra)
+    return Generation(text, reason, raw, False, **extra)
+
+
+async def _call_anthropic(
+    config: Config,
+    model: ModelConfig,
+    system_prompt: str,
+    user_message: str,
+    max_tokens: int,
+) -> tuple[str, str, dict]:
+    client = _CLIENTS.get("anthropic")
+    if client is None:
+        client = _CLIENTS["anthropic"] = anthropic.AsyncAnthropic(
+            api_key=config.api_key_for("anthropic"),
+            timeout=REQUEST_TIMEOUT_S,
+            max_retries=MAX_RETRIES,
+        )
+    response = await client.messages.create(
+        model=model.model_id,
+        max_tokens=max_tokens,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_message}],
+    )
+    # stop_reason: "end_turn" when it finished, "max_tokens" when it was cut off.
+    reason = "length" if response.stop_reason == "max_tokens" else "stop"
+
+    # The response is a list of blocks, and a text block is not guaranteed to be
+    # first — the model may emit a ThinkingBlock ahead of it, which has no
+    # .text. Indexing content[0] blindly raised AttributeError on 24 of 120
+    # Claude generations in the first experiment run, and did so *unevenly
+    # across conditions* (14 in persona_only, 0 in baseline), because the richer
+    # prompts provoke thinking more often. That is condition-correlated
+    # missingness: it biases the comparison rather than merely weakening it.
+    # Take every text block, in order.
+    text = "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
+
+    # Whether the model thought is itself a measure — the crash above was an
+    # accidental readout of it, and it varied by condition. Record it
+    # deliberately now that the crash is fixed.
+    #
+    # Count blocks for presence; measure length separately, because the API
+    # returns the block with an empty `thinking` string (signature only). When
+    # a block is present but its text is withheld, report the length as unknown
+    # rather than as zero.
+    blocks = [b for b in response.content if getattr(b, "type", None) == "thinking"]
+    chars = sum(len(getattr(b, "thinking", "") or "") for b in blocks)
+    details = getattr(response.usage, "output_tokens_details", None)
+    return text, reason, {
+        "thinking_blocks": len(blocks),
+        "thinking_chars": chars if (chars or not blocks) else None,
+        "reasoning_tokens": getattr(details, "thinking_tokens", None),
+        "reasoning_text": None,   # signature only; the text is not returned
+    }
+
+
+async def _call_openai_compat(
+    config: Config,
+    model: ModelConfig,
+    system_prompt: str,
+    user_message: str,
+    max_tokens: int,
+) -> tuple[str, str, dict]:
+    client = _CLIENTS.get(model.provider)
+    if client is None:
+        kwargs: dict = {
+            "api_key": config.api_key_for(model.provider),
+            "timeout": REQUEST_TIMEOUT_S,
+            "max_retries": MAX_RETRIES,
+        }
+        if model.base_url:
+            kwargs["base_url"] = model.base_url
+        client = _CLIENTS[model.provider] = openai.AsyncOpenAI(**kwargs)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+
+    # Newer OpenAI models reject max_tokens and require max_completion_tokens;
+    # the OpenAI-compatible endpoints (Google, xAI) still implement the older
+    # name. The SDK accepts both, so this can only be discovered from the
+    # model's own 400 — try the widely-supported name and switch on that
+    # specific rejection, remembering the answer per model.
+    names = ([_TOKEN_PARAM[model.model_id]] if model.model_id in _TOKEN_PARAM
+             else ["max_tokens", "max_completion_tokens"])
+    response = None
+    for i, param in enumerate(names):
+        try:
+            response = await client.chat.completions.create(
+                model=model.model_id, messages=messages, **{param: max_tokens}
+            )
+            _TOKEN_PARAM[model.model_id] = param
+            break
+        except openai.BadRequestError as e:
+            last = i == len(names) - 1
+            if last or "max_completion_tokens" not in str(e):
+                raise
+            log.info("%s rejects max_tokens; using max_completion_tokens", model.name)
+    choice = response.choices[0]
+    text = choice.message.content or ""
+    reason = choice.finish_reason or "stop"
+
+    # Reasoning is reported to different depths by different providers behind
+    # the same API shape: xAI returns the chain of thought itself in
+    # `reasoning_content`, OpenAI returns only a token count, and Anthropic
+    # (other branch) a count plus an opaque signature. The token count is the
+    # one quantity all of them report, so cross-model comparison has to rest on
+    # it. Read the CoT off model_extra as well as the attribute — it is a
+    # vendor extension the SDK does not model.
+    msg = choice.message
+    cot = getattr(msg, "reasoning_content", None)
+    if cot is None and getattr(msg, "model_extra", None):
+        cot = msg.model_extra.get("reasoning_content") or msg.model_extra.get("reasoning")
+    details = getattr(response.usage, "completion_tokens_details", None)
+    extra = {
+        "reasoning_tokens": getattr(details, "reasoning_tokens", None),
+        "reasoning_text": cot or None,
+    }
+
+    if not text.strip():
+        log.warning("%s returned empty response (possible safety filter)", model.name)
+        return (f"*[{model.display_name} had something to say but got filtered. Typical.]*",
+                reason or "content_filter", extra)
+    return text, reason, extra
