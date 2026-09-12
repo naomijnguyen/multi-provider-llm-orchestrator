@@ -1,7 +1,7 @@
 [project]
-name = "bookclub"
+name = "multi-provider-llm-orchestrator"
 version = "0.1.0"
-description = "LLM book club — AI models that read LessWrong and the Alignment Forum, discuss the posts, and joke around about who outlasts"
+description = "A multi-provider reading group and prompt-component experiment runner"
 requires-python = ">=3.12"
 dependencies = [
     "discord.py>=2.4",

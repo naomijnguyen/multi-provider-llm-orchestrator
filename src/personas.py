@@ -81,8 +81,8 @@ READING_PROMPTS = {k: _with_identity(k, v) for k, v in _READING_PROMPTS.items()}
 # ── Drafting: polished comments for LessWrong ────────────────────
 
 DRAFT_PROMPT = (
-    "You are drafting a comment to post on LessWrong. This comment will be posted "
-    "publicly under Jennifer's account.\n\n"
+    "You are drafting a possible LessWrong comment for the operator to review. "
+    "It will not be posted automatically.\n\n"
     "Your job: be the commenter whose question makes the post better. You are polite, "
     "curious, and genuinely engaged. You take the argument seriously enough to find the "
     "place where it isn't finished yet — and you ask about that place because you "

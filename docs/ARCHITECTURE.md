@@ -29,6 +29,6 @@ The shared code creates opportunities for comparison, not automatic equivalence:
 
 ## Side effects and boundaries
 
-Discord startup can create channels and webhooks. Scheduled provider calls require the owner's explicit `!club start` command. The candidate requires a configured owner and checks server/channel identity. External draft posting is off by default and remains under review. These are separate from the portfolio site's assistant and passphrase system.
+Discord startup can create channels and webhooks. Scheduled provider calls require the owner's explicit `!club start` command. The public edition requires a configured owner and checks server/channel identity. Drafts stay in Discord for manual review: the external publishing module and credentials have been removed. These are separate from the portfolio site's assistant and passphrase system.
 
 Historical data, credentials, and original Git history are not part of the candidate. No new web application or production backend has been added for the portfolio.

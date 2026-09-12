@@ -99,14 +99,14 @@ async def _one(sem, config, model_cfg, cond, paper, rep, run_id):
         "had_thinking": "" if gen.had_thinking is None else gen.had_thinking,
         "thinking_blocks": "" if gen.thinking_blocks is None else gen.thinking_blocks,
         "thinking_chars": "" if gen.thinking_chars is None else gen.thinking_chars,
-        # Reasoning effort, reported by every provider even where the text is
-        # withheld — the only reasoning quantity comparable across models.
+        # Optional provider metadata; availability and meaning can differ.
         "reasoning_tokens": "" if gen.reasoning_tokens is None else gen.reasoning_tokens,
         "reasoning_chars": "" if gen.reasoning_text is None else len(gen.reasoning_text),
         "reasoning_text": gen.reasoning_text or "",
         "response": text,
     }
     row.update(measure(text, model_cfg.name))
+    row["is_error"] = gen.finish_reason == "error" or row["is_error"]
     log.info("%-14s %-13s p%-3s r%s  %4d chars  id=%s",
              model_cfg.name, cond, paper["id"], rep, len(text), row["identity_claim"])
     return row

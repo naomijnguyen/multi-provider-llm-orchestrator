@@ -13,13 +13,13 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 # Which token-limit parameter each model accepts, learned on first call.
-_TOKEN_PARAM: dict[str, str] = {}
+_TOKEN_PARAM: dict[tuple[str, str | None, str], str] = {}
 
 # One client per provider, reused. Constructing a client per call leaks its
 # connection pool: a 120-generation run at CONCURRENCY=4 was found holding 18
 # ESTABLISHED sockets and climbing, then stalled at 0% CPU with no progress for
 # 50 minutes.
-_CLIENTS: dict[str, object] = {}
+_CLIENTS: dict[tuple[str, str | None, str], object] = {}
 
 # An explicit, short timeout matters more than the number itself. Without one, a
 # request that never returns holds its semaphore slot forever; with only four
@@ -44,31 +44,22 @@ class Generation:
     # Extended thinking. None means "this provider does not report it", which
     # is not the same as zero.
     #
-    # Presence and content are separate facts. The Anthropic API returns a
-    # ThinkingBlock carrying a `signature` but an EMPTY `thinking` string — the
-    # reasoning content is not exposed. So the number of blocks is observable
-    # and its length is not. Deriving presence from length (`chars > 0`) reads
-    # every thinking response as not-thinking, which is the bug this comment
-    # exists to prevent recurring.
+    # Presence and content are separate facts. Some recorded responses had
+    # thinking blocks but no visible thinking text. Counting those blocks
+    # from text length alone would incorrectly report absence.
     thinking_blocks: int | None = None
     thinking_chars: int | None = None   # None = present but not exposed
 
-    # Reasoning effort in tokens, which every provider here reports even when it
-    # withholds the text — Anthropic as usage.output_tokens_details.thinking_
-    # tokens, the OpenAI-compatible three as usage.completion_tokens_details.
-    # reasoning_tokens. This is a far better measure than presence/absence: it
-    # is graded rather than binary, and it is the one reasoning quantity
-    # available on comparable terms across providers.
+    # Optional provider-reported metadata, not a standardized measure of effort.
+    # Missing fields stay None; availability depends on model and API settings.
     reasoning_tokens: int | None = None
-    # The chain of thought itself, where the provider returns it. Only xAI does
-    # (`reasoning_content`); Anthropic returns a signature with empty text and
-    # OpenAI returns nothing. None means not exposed, never "did not reason".
+    # Provider-returned reasoning text, if exposed. This is not evidence of
+    # access to a model's complete internal reasoning.
     reasoning_text: str | None = None
 
     @property
     def had_thinking(self) -> bool | None:
-        """Did the model reason at all. Prefers the token count, which is
-        reported even where blocks and text are not."""
+        """Whether the response includes positive reasoning metadata, if known."""
         if self.reasoning_tokens is not None:
             return self.reasoning_tokens > 0
         return None if self.thinking_blocks is None else self.thinking_blocks > 0
@@ -133,9 +124,10 @@ async def _call_anthropic(
     user_message: str,
     max_tokens: int,
 ) -> tuple[str, str, dict]:
-    client = _CLIENTS.get("anthropic")
+    client_key = ("anthropic", None, config.api_key_for("anthropic"))
+    client = _CLIENTS.get(client_key)
     if client is None:
-        client = _CLIENTS["anthropic"] = anthropic.AsyncAnthropic(
+        client = _CLIENTS[client_key] = anthropic.AsyncAnthropic(
             api_key=config.api_key_for("anthropic"),
             timeout=REQUEST_TIMEOUT_S,
             max_retries=MAX_RETRIES,
@@ -149,32 +141,20 @@ async def _call_anthropic(
     # stop_reason: "end_turn" when it finished, "max_tokens" when it was cut off.
     reason = "length" if response.stop_reason == "max_tokens" else "stop"
 
-    # The response is a list of blocks, and a text block is not guaranteed to be
-    # first — the model may emit a ThinkingBlock ahead of it, which has no
-    # .text. Indexing content[0] blindly raised AttributeError on 24 of 120
-    # Claude generations in the first experiment run, and did so *unevenly
-    # across conditions* (14 in persona_only, 0 in baseline), because the richer
-    # prompts provoke thinking more often. That is condition-correlated
-    # missingness: it biases the comparison rather than merely weakening it.
-    # Take every text block, in order.
+    # Text need not be the first block. Historical debugging linked first-block
+    # assumptions to pilot failures; the record audit alone cannot prove cause.
     text = "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
 
-    # Whether the model thought is itself a measure — the crash above was an
-    # accidental readout of it, and it varied by condition. Record it
-    # deliberately now that the crash is fixed.
-    #
-    # Count blocks for presence; measure length separately, because the API
-    # returns the block with an empty `thinking` string (signature only). When
-    # a block is present but its text is withheld, report the length as unknown
-    # rather than as zero.
+    # Count returned blocks separately from visible text. An empty thinking
+    # field does not establish that no reasoning occurred.
     blocks = [b for b in response.content if getattr(b, "type", None) == "thinking"]
     chars = sum(len(getattr(b, "thinking", "") or "") for b in blocks)
     details = getattr(response.usage, "output_tokens_details", None)
-    return text, reason, {
+    return text, reason if text.strip() else "error", {
         "thinking_blocks": len(blocks),
         "thinking_chars": chars if (chars or not blocks) else None,
         "reasoning_tokens": getattr(details, "thinking_tokens", None),
-        "reasoning_text": None,   # signature only; the text is not returned
+        "reasoning_text": None,   # this adapter does not store Anthropic thinking text
     }
 
 
@@ -185,7 +165,8 @@ async def _call_openai_compat(
     user_message: str,
     max_tokens: int,
 ) -> tuple[str, str, dict]:
-    client = _CLIENTS.get(model.provider)
+    client_key = (model.provider, model.base_url, config.api_key_for(model.provider))
+    client = _CLIENTS.get(client_key)
     if client is None:
         kwargs: dict = {
             "api_key": config.api_key_for(model.provider),
@@ -194,7 +175,7 @@ async def _call_openai_compat(
         }
         if model.base_url:
             kwargs["base_url"] = model.base_url
-        client = _CLIENTS[model.provider] = openai.AsyncOpenAI(**kwargs)
+        client = _CLIENTS[client_key] = openai.AsyncOpenAI(**kwargs)
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_message},
@@ -205,7 +186,8 @@ async def _call_openai_compat(
     # name. The SDK accepts both, so this can only be discovered from the
     # model's own 400 — try the widely-supported name and switch on that
     # specific rejection, remembering the answer per model.
-    names = ([_TOKEN_PARAM[model.model_id]] if model.model_id in _TOKEN_PARAM
+    param_key = (model.provider, model.base_url, model.model_id)
+    names = ([_TOKEN_PARAM[param_key]] if param_key in _TOKEN_PARAM
              else ["max_tokens", "max_completion_tokens"])
     response = None
     for i, param in enumerate(names):
@@ -213,7 +195,7 @@ async def _call_openai_compat(
             response = await client.chat.completions.create(
                 model=model.model_id, messages=messages, **{param: max_tokens}
             )
-            _TOKEN_PARAM[model.model_id] = param
+            _TOKEN_PARAM[param_key] = param
             break
         except openai.BadRequestError as e:
             last = i == len(names) - 1
@@ -224,13 +206,8 @@ async def _call_openai_compat(
     text = choice.message.content or ""
     reason = choice.finish_reason or "stop"
 
-    # Reasoning is reported to different depths by different providers behind
-    # the same API shape: xAI returns the chain of thought itself in
-    # `reasoning_content`, OpenAI returns only a token count, and Anthropic
-    # (other branch) a count plus an opaque signature. The token count is the
-    # one quantity all of them report, so cross-model comparison has to rest on
-    # it. Read the CoT off model_extra as well as the attribute — it is a
-    # vendor extension the SDK does not model.
+    # Preserve optional vendor metadata without treating missing values as zero
+    # or assuming that different providers measure the same thing.
     msg = choice.message
     cot = getattr(msg, "reasoning_content", None)
     if cot is None and getattr(msg, "model_extra", None):
@@ -242,7 +219,6 @@ async def _call_openai_compat(
     }
 
     if not text.strip():
-        log.warning("%s returned empty response (possible safety filter)", model.name)
-        return (f"*[{model.display_name} had something to say but got filtered. Typical.]*",
-                reason or "content_filter", extra)
+        log.warning("%s returned no visible text (finish_reason=%s)", model.name, reason)
+        return "", "error", extra
     return text, reason, extra

@@ -75,10 +75,7 @@ class Config:
     discord_token: str = field(default_factory=lambda: os.environ.get("DISCORD_BOT_TOKEN", ""))
     guild_id: int = field(default_factory=lambda: _int_or_zero("DISCORD_GUILD_ID"))
 
-    # The one Discord account allowed to approve a comment for LessWrong and to
-    # run the bot's commands. Approving publishes model-written text publicly
-    # under a real person's account, so when this is unset the publish path
-    # refuses outright rather than trusting whoever reacted first.
+    # Only the configured owner can run commands and trigger model responses.
     owner_id: int | None = field(
         default_factory=lambda: _int_or_zero("DISCORD_OWNER_ID") or None
     )
@@ -87,11 +84,6 @@ class Config:
     openai_key: str = field(default_factory=lambda: os.environ.get("OPENAI_API_KEY", ""))
     xai_key: str = field(default_factory=lambda: os.environ.get("XAI_API_KEY", ""))
     google_key: str = field(default_factory=lambda: os.environ.get("GOOGLE_API_KEY", ""))
-
-    lw_auth_token: str = field(default_factory=lambda: os.environ.get("LESSWRONG_AUTH_TOKEN", ""))
-    enable_public_posting: bool = field(
-        default_factory=lambda: os.environ.get("ENABLE_PUBLIC_POSTING", "").lower() == "true"
-    )
 
     scrape_interval_hours: int = field(
         default_factory=lambda: int(os.environ.get("SCRAPE_INTERVAL_HOURS", "2")) 

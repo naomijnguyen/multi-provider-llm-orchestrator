@@ -102,6 +102,7 @@ async def post_as_model(
                 content=piece,
                 username=model.display_name,
                 avatar_url=model.avatar_url,
+                allowed_mentions=discord.AllowedMentions.none(),
                 wait=True,  # returns the Message object
             )
         except discord.HTTPException as e:
@@ -109,7 +110,7 @@ async def post_as_model(
             # Fall back to a regular channel message, chunked again because the
             # name prefix makes it longer than the piece we just failed to send.
             for sub in chunk(f"**{model.display_name}**: {piece}"):
-                message = await channel.send(sub)  # type: ignore[assignment]
+                message = await channel.send(sub, allowed_mentions=discord.AllowedMentions.none())  # type: ignore[assignment]
     # The last message is the one carrying any footer, so reactions land there.
     return message  # type: ignore[return-value]
 
@@ -136,17 +137,13 @@ async def post_draft(
     post_title: str,
     post_url: str,
 ) -> discord.WebhookMessage:
-    """Post a draft comment to #drafts. Users react with ✅ to approve."""
+    """Post a draft for manual review; this edition cannot publish it externally."""
     content = (
         f"**Draft comment for:** [{post_title}]({post_url})\n"
         f"─────────────────────────────\n"
         f"{draft_text}\n"
         f"─────────────────────────────\n"
-        f"*React with ✅ to approve posting to LessWrong*"
+        f"*Draft for review. External publishing is not enabled in this edition.*"
     )
-    # No length budgeting needed: post_as_model chunks, so the approval footer
-    # survives even when the draft is long. The reaction goes on the last
-    # message, which is the one holding the footer.
     message = await post_as_model(channel, model, content)
-    await message.add_reaction("✅")
     return message

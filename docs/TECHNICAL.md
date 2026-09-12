@@ -18,12 +18,14 @@ Measurements include character and token-like word counts, punctuation/formattin
 
 The identity matcher recognizes common self-statements and opening bylines but can also match quoted statements. The candidate has not silently changed that detector. A reviewed annotation set is the next step before rescoring historical identity results.
 
-The historical error detector recognizes bracketed placeholder text. The candidate's replay utility preserves an existing `is_error` field rather than replacing a generation-time classification from a later text heuristic. Broader adapter-to-runner error handling still needs integration tests.
+The historical error detector recognizes bracketed placeholder text. The replay utility preserves an existing `is_error` field rather than replacing a generation-time classification from a later text heuristic. Fresh runs also use the adapter's error classification, so an empty visible response cannot silently become a successful measurement. An offline integration test covers that path.
 
-## Verification so far
+## Verification
 
-Eight offline candidate checks cover syntax, replay metadata preservation, existing-output protection, request/stimulus validation, and selected Discord guards. Discord guard functions are executed with fakes rather than through a live SDK connection.
+The public offline suite checks mixed response blocks, optional metadata, token-parameter fallback, client reuse, text clipping, error handling, generation-to-measurement propagation, disabled external publishing, and scheduler start/stop behavior. It imports the real application modules and replaces provider calls with synthetic responses. Run it with `python -m unittest discover -s tests -v`.
+
+Eight additional preparation checks cover syntax, replay metadata preservation, existing-output protection, request/stimulus validation, and selected Discord guards.
 
 A separate private read-only record audit checks counts, duplicate keys, stored lengths, stimulus equivalence, and descriptive article-level contrasts. It prints aggregates without exporting responses. See [research notes](RESEARCH.md) for verified findings and remaining analysis gaps.
 
-An isolated installation succeeded. Provider mocks, scheduler behavior, concurrent approval handling, and live-service compatibility still need checks before release. Model IDs are now supplied through environment configuration, and package build settings are explicit. No new provider calls were made during this review; a reviewed dependency lock and final installation guide are still pending.
+An isolated installation and wheel build succeeded. The [setup guide](SETUP.md) includes a tested dependency snapshot. Model IDs come from environment configuration. The release review made no live provider calls or Discord connections; mocks establish the tested code paths, not current model access or end-to-end live-service compatibility. External publishing has been removed, so there is no comment-approval publishing race in this edition.

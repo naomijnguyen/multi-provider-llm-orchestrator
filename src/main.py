@@ -91,17 +91,11 @@ def main() -> None:
             lines.append(f"• [{p['status']}] {p['title']}")
         await ctx.send("\n".join(lines))
 
-    # Start the scheduler after the bot is ready
+    # Connecting never starts paid scheduled work.
     original_on_ready = bot.on_ready
 
     async def on_ready_with_scheduler() -> None:
         await original_on_ready()
-        # on_ready fires again after every full reconnect. Each call used to
-        # build a fresh AsyncIOScheduler with its own jobstore — so the
-        # id="book_club_main" collision never fired — and N reconnects meant
-        # N copies of every post and N times the spend.
-        # start_scheduler is idempotent, so a reconnect firing on_ready again
-        # cannot build a second scheduler.
         log.info("Journal Club connected. Use !club start to enable scheduled work.")
 
     bot.on_ready = on_ready_with_scheduler  # type: ignore[assignment]

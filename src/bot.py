@@ -62,73 +62,8 @@ class BookClubBot(commands.Bot):
         log.info("Channels ready: %s", list(self.club_channels.keys()))
 
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
-        """Handle ✅ reactions on draft messages to approve posting to LessWrong."""
-        if not self.config.enable_public_posting or payload.guild_id != self.config.guild_id:
-            return
-        if str(payload.emoji) != "✅":
-            return
-        # Ignore the bot's own reactions (it adds ✅ as a prompt)
-        if payload.user_id == self.user.id:  # type: ignore[union-attr]
-            return
-
-        drafts_channel = self.club_channels.get("drafts")
-        if drafts_channel is None or payload.channel_id != drafts_channel.id:
-            return
-
-        # Approving publishes a model-written comment to LessWrong under a real
-        # account, using a ~5-year credential. Only the owner may do that, and
-        # with no owner configured this fails closed.
-        if self.config.owner_id is None:
-            log.warning(
-                "Ignoring the approval from %s: DISCORD_OWNER_ID is unset, so "
-                "nothing may be published to LessWrong.",
-                payload.user_id,
-            )
-            return
-        if payload.user_id != self.config.owner_id:
-            log.warning("Ignoring the approval from non-owner %s", payload.user_id)
-            return
-
-        message_id = str(payload.message_id)
-        response = db.approve_response(self.config.db_path, message_id)
-        if response is None:
-            return
-        # approve_response sets `approved` but leaves `posted_to_lw` alone, so a
-        # re-added reaction on an already-published draft arrives here. Without
-        # this the comment posts to LessWrong a second time.
-        if response["posted_to_lw"]:
-            log.info(
-                "Response %s is already posted to LessWrong; ignoring", response["id"]
-            )
-            return
-
-        log.info("Response %s approved for LessWrong posting", response["id"])
-
-        # Post to LessWrong if we have a token
-        if self.config.lw_auth_token:
-            from .lesswrong import post_comment
-
-            post = db.get_post(self.config.db_path, response["post_id"])
-            if post:
-                success = await post_comment(
-                    self.config.lw_auth_token,
-                    post_id=post["lw_id"],
-                    body=response["response_text"],
-                )
-                if success:
-                    db.mark_posted_to_lw(self.config.db_path, response["id"])
-                    approved_ch = self.club_channels.get("approved")
-                    if approved_ch:
-                        await approved_ch.send(
-                            f"✅ Posted comment to LessWrong: **{post['title']}**\n{post['url']}"
-                        )
-        else:
-            approved_ch = self.club_channels.get("approved")
-            if approved_ch:
-                await approved_ch.send(
-                    "⚠️ Comment approved but no `LESSWRONG_AUTH_TOKEN` configured. "
-                    "Set it in `.env` to enable auto-posting."
-                )
+        """External publishing is disabled in the public source edition."""
+        return
 
     # ── Interactive: respond when Jen posts in channels ─────────
 
@@ -387,7 +322,7 @@ class BookClubBot(commands.Bot):
             f"**{r['model_name']}**: {r['response_text']}" for r in responses
         )
 
-        # Claude always drafts — it's going under Jen's name
+        # Keep one consistent drafter for comments the operator reviews.
         drafter = next(m for m in self.config.models if m.name == "claude")
         article_text = (post.get("content") or post["title"])[:4000]
 

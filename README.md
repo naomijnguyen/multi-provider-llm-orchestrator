@@ -37,14 +37,18 @@ The same provider adapter supports both the reading group and the experiment. Th
 
 That reuse is practical: the application gave me a place to notice behavior, and the experiment gave me a more controlled way to investigate it. [Architecture](docs/ARCHITECTURE.md) follows those shared modules; [technical notes](docs/TECHNICAL.md) describe their boundaries.
 
-## Preparation status
+## Run and Explore
 
-This is the local candidate for `multi-provider-llm-orchestrator`, not a published release. It is derived from the original Python implementation, with small safety and data-preservation changes. Eight offline checks cover selected behaviors. An isolated installation succeeded; mock-provider integration and final packaging checks remain. The record audit confirms counts and descriptive length contrasts, not the historical inferential analysis.
+Start with the [local setup guide](docs/SETUP.md). The offline test suite uses synthetic provider responses, so you can check the adapters without accounts or API credits. Python dependencies are listed in `pyproject.toml`, with the tested versions in `constraints.txt`.
+
+This source-inspection edition comes from the original Python implementation, with focused safety and data-preservation changes. The record audit confirms counts and descriptive length contrasts, not the historical inferential analysis.
 
 Live generation spends provider tokens. Starting the Discord application connects to a server and can create channels and webhooks. Scheduled work now requires the owner's explicit `!club start` command. Neither entry point is an offline demo. No credentials or saved study data are included here.
 
-External comment approval is disabled unless explicitly enabled. That path still needs additional review before use.
+Draft comments remain in Discord for manual review. External publishing code and credential settings are not included.
+
+Read the project story on [Jennifer's portfolio](https://www.naomijnguyen.com/?doc=journal-club-evals).
 
 ## Rights and reuse
 
-No open-source or general reuse license is granted for the original code and documentation in this candidate. It is being prepared as a portfolio source-inspection release. Any publication remains subject to applicable law and the hosting platform's terms. Third-party components retain their own licenses. Contact the author to discuss reuse permissions.
+No open-source or general reuse license is granted for the original code and documentation in this repository. This is a portfolio source-inspection release. Third-party components retain their own licenses; provider names and logos belong to their respective owners and do not imply endorsement. Article text and historical response data are not bundled. Contact the author to discuss reuse permissions.
